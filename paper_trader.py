@@ -1,378 +1,241 @@
 """
-Swing Strategy Paper Trader
-Live paper trading for the multi-factor momentum swing strategy.
-
-Monitors 4-hour data and executes trades based on strategy signals.
-Logs all activity and tracks performance in real-time.
+Multi-Strategy Paper Trader - A lean, multi-strategy paper trading system.
 """
 
 import yfinance as yf
 import pandas as pd
-import numpy as np
 import time
 import logging
-from datetime import datetime, timedelta
-from swing_strategy import backtest_swing_strategy
-import os
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+
+# Import strategies
+from strategies.swing_strategy import SwingStrategy
+from strategies.momentum_strategy import MomentumBreakoutStrategy
+from strategies.rsi_crossover_strategy import RSICrossoverStrategy
+from strategies.rsi_threshold_strategy import RSIThresholdStrategy
+from strategies.rsi_bidirectional_strategy import RSIBidirectionalStrategy
 
 
-class SwingPaperTrader:
-    """Paper trading system for swing strategy."""
-    
-    def __init__(self, initial_balance=10000, leverage=2.0):
-        self.initial_balance = initial_balance
-        self.balance = initial_balance
-        self.leverage = leverage
-        self.positions = {}  # {ticker: position_data}
-        self.trade_history = []
-        self.equity_curve = [initial_balance]
-        
-        # Strategy parameters
-        self.base_position_size = 0.4  # 40% base position
-        self.hold_min_bars = 4
-        self.hold_max_bars = 30
-        
-        # Trading hours (4-hour bars update at specific times)
-        self.update_times = ['09:30', '13:30', '17:30', '21:30']  # EST
-        
-        # Setup logging
+class PaperTrader:
+    """A lean, multi-strategy paper trading system."""
+
+    def __init__(self, strategies: List[Any], balance_per_strategy: float = 100):
+        self.strategies = {s.name: s for s in strategies}
+        self.initial_balance = balance_per_strategy * len(strategies)
+        self.balances = {s.name: balance_per_strategy for s in strategies}
+        self.positions = {s.name: {} for s in strategies}
+        self.trade_history = {s.name: [] for s in strategies}
+
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler("swing_paper_trader.log"),
-                logging.StreamHandler()
-            ]
+            format="%(asctime)s - %(message)s",
+            handlers=[logging.FileHandler("paper_trader.log"), logging.StreamHandler()],
         )
-        
         self.logger = logging.getLogger(__name__)
-        self.logger.info(f"🚀 Swing Paper Trader initialized with ${initial_balance:,.2f}")
-    
-    def get_live_data(self, ticker, interval='1h', period='5d'):
-        """Get live market data."""
+        self.logger.info(
+            f"🚀 Trader initialized with {len(strategies)} strategies (${balance_per_strategy:,.0f} each)."
+        )
+
+    def get_market_data(
+        self, ticker: str, interval: str = "1h", period: str = "5d"
+    ) -> Optional[pd.DataFrame]:
+        """Fetches and prepares market data, resampling to a 4h timeframe."""
         try:
-            data = yf.download(ticker, period=period, interval=interval,
-                             auto_adjust=True, progress=False)
-            
-            if data.empty:
+            data = yf.download(
+                ticker,
+                period=period,
+                interval=interval,
+                auto_adjust=True,
+                progress=False,
+            )
+            if data.empty or len(data) < 4:
                 return None
-            
             if isinstance(data.columns, pd.MultiIndex):
                 data.columns = data.columns.droplevel(1)
-            
-            data.dropna(inplace=True)
-            return data
-        except Exception as e:
-            self.logger.error(f"Error fetching data for {ticker}: {e}")
-            return None
-    
-    def convert_to_4h(self, hourly_data):
-        """Convert 1-hour data to 4-hour bars."""
-        if hourly_data is None or len(hourly_data) < 4:
-            return None
-        
-        # Resample to 4-hour bars
-        data_4h = hourly_data.resample('4H').agg({
-            'Open': 'first',
-            'High': 'max',
-            'Low': 'min',
-            'Close': 'last',
-            'Volume': 'sum'
-        }).dropna()
-        
-        return data_4h
-    
-    def check_signals(self, ticker, data_4h, spy_data=None):
-        """Check for entry/exit signals using swing strategy."""
-        if data_4h is None or len(data_4h) < 100:
-            return None, None
-        
-        # Run strategy on recent data
-        try:
-            equity_curve, trades = backtest_swing_strategy(
-                data_4h.copy(), 
-                spy_data,
-                initial_balance=10000,
-                leverage=self.leverage,
-                base_position_size=self.base_position_size,
-                hold_min_bars=self.hold_min_bars,
-                hold_max_bars=self.hold_max_bars
+            return (
+                data.resample("4h")
+                .agg(
+                    {
+                        "Open": "first",
+                        "High": "max",
+                        "Low": "min",
+                        "Close": "last",
+                        "Volume": "sum",
+                    }
+                )
+                .dropna()
             )
-            
-            if not trades:
-                return None, None
-            
-            # Get the most recent trade
-            latest_trade = trades[-1]
-            
-            # Check if this is a new trade (not already in our positions)
-            if ticker in self.positions:
-                # Check if it's the same trade (same entry date)
-                if (self.positions[ticker]['entry_date'] == latest_trade['entry_date'] and
-                    self.positions[ticker]['entry_price'] == latest_trade['entry_price']):
-                    return None, None  # Same trade, no action needed
-            
-            # New trade signal
-            if latest_trade['type'] == 'long':
-                return 'BUY', latest_trade
-            elif latest_trade['type'] == 'short':
-                return 'SELL', latest_trade
-                
         except Exception as e:
-            self.logger.error(f"Error checking signals for {ticker}: {e}")
-            return None, None
-    
-    def execute_trade(self, ticker, signal, trade_data, current_price):
-        """Execute a paper trade."""
-        if signal == 'BUY':
-            # Calculate position size
-            position_value = self.balance * self.base_position_size
-            shares = (position_value * self.leverage) / current_price
-            
-            self.positions[ticker] = {
-                'type': 'long',
-                'shares': shares,
-                'entry_price': current_price,
-                'entry_date': datetime.now(),
-                'position_value': position_value,
-                'highest_price': current_price,
-                'bars_held': 0,
-                'entry_signals': trade_data.get('entry_signals', []),
-                'conviction': trade_data.get('conviction', 0)
-            }
-            
-            self.logger.info(f"📈 BUY {ticker}: {shares:.2f} shares at ${current_price:.2f} "
-                           f"(Value: ${position_value:,.2f})")
-            
-        elif signal == 'SELL' and ticker in self.positions:
-            # Close position
-            position = self.positions[ticker]
-            exit_value = position['shares'] * current_price
-            pnl = (current_price - position['entry_price']) / position['entry_price'] * position['position_value'] * self.leverage
-            
-            # Calculate fees (0.1% per side)
-            fees = position['position_value'] * self.leverage * 0.001 * 2
-            net_pnl = pnl - fees
-            
-            self.balance += net_pnl
-            
-            # Record trade
-            self.trade_history.append({
-                'ticker': ticker,
-                'type': position['type'],
-                'entry_date': position['entry_date'],
-                'exit_date': datetime.now(),
-                'entry_price': position['entry_price'],
-                'exit_price': current_price,
-                'shares': position['shares'],
-                'pnl': net_pnl,
-                'return_pct': (current_price / position['entry_price'] - 1) * 100,
-                'bars_held': position['bars_held'],
-                'exit_reason': 'signal_exit'
-            })
-            
-            self.logger.info(f"📉 SELL {ticker}: {position['shares']:.2f} shares at ${current_price:.2f} "
-                           f"(PnL: ${net_pnl:,.2f}, Return: {((current_price/position['entry_price']-1)*100):.2f}%)")
-            
-            del self.positions[ticker]
-    
-    def update_positions(self, ticker, current_price):
-        """Update position tracking (highest price, bars held)."""
-        if ticker in self.positions:
-            position = self.positions[ticker]
-            
-            # Update highest price for trailing stops
-            if current_price > position['highest_price']:
-                position['highest_price'] = current_price
-            
-            # Update bars held
-            position['bars_held'] += 1
-            
-            # Check exit conditions
-            should_exit = False
-            exit_reason = None
-            
-            price_change = (current_price / position['entry_price'] - 1)
-            drawdown_from_high = (current_price / position['highest_price'] - 1)
-            
-            # Take profit: +20%
-            if price_change >= 0.20:
-                should_exit = True
-                exit_reason = 'profit_target'
-            
-            # Stop loss: -4%
-            elif price_change <= -0.04:
-                should_exit = True
-                exit_reason = 'stop_loss'
-            
-            # Trailing stop: -6% from highest
-            elif drawdown_from_high <= -0.06:
-                should_exit = True
-                exit_reason = 'trailing_stop'
-            
-            # Max hold time
-            elif position['bars_held'] >= self.hold_max_bars:
-                should_exit = True
-                exit_reason = 'max_hold'
-            
-            # Min hold time check
-            if should_exit and position['bars_held'] < self.hold_min_bars:
-                if exit_reason != 'stop_loss':
-                    should_exit = False
-            
-            if should_exit:
-                self.execute_trade(ticker, 'SELL', None, current_price)
-    
-    def get_portfolio_value(self, current_prices):
-        """Calculate total portfolio value."""
-        total_value = self.balance
-        
-        for ticker, position in self.positions.items():
-            if ticker in current_prices:
-                current_price = current_prices[ticker]
-                position_value = position['shares'] * current_price
-                total_value += position_value
-        
-        return total_value
-    
-    def log_portfolio_status(self, current_prices):
-        """Log current portfolio status."""
-        portfolio_value = self.get_portfolio_value(current_prices)
-        total_return = (portfolio_value / self.initial_balance - 1) * 100
-        
-        self.logger.info(f"\n{'='*60}")
-        self.logger.info(f"💼 PORTFOLIO UPDATE - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        self.logger.info(f"{'='*60}")
-        self.logger.info(f"Total Value: ${portfolio_value:,.2f}")
-        self.logger.info(f"Cash Balance: ${self.balance:,.2f}")
-        self.logger.info(f"Total Return: {total_return:+.2f}%")
-        self.logger.info(f"Active Positions: {len(self.positions)}")
-        
-        if self.positions:
-            for ticker, pos in self.positions.items():
-                if ticker in current_prices:
-                    current_price = current_prices[ticker]
-                    unrealized_pnl = (current_price / pos['entry_price'] - 1) * pos['position_value'] * self.leverage
-                    unrealized_pct = (current_price / pos['entry_price'] - 1) * 100
-                    
-                    self.logger.info(f"  {ticker}: {pos['shares']:.2f} shares @ ${current_price:.2f} "
-                                   f"(Unrealized: ${unrealized_pnl:+.2f}, {unrealized_pct:+.2f}%)")
-        
-        if self.trade_history:
-            recent_trades = self.trade_history[-5:]  # Last 5 trades
-            self.logger.info(f"\nRecent Trades:")
-            for trade in recent_trades:
-                self.logger.info(f"  {trade['ticker']} {trade['type']}: "
-                               f"{trade['return_pct']:+.2f}% (${trade['pnl']:+.2f})")
-        
-        self.logger.info(f"{'='*60}")
-    
-    def run(self, tickers=['NVDA', 'AMD', 'ETH-USD'], check_interval=3600):
-        """
-        Run the paper trader.
-        
-        Args:
-            tickers: List of tickers to monitor
-            check_interval: How often to check (seconds) - default 1 hour
-        """
-        self.logger.info(f"🚀 Starting Swing Paper Trader")
-        self.logger.info(f"Monitoring: {', '.join(tickers)}")
-        self.logger.info(f"Check interval: {check_interval/60:.1f} minutes")
-        self.logger.info(f"Press Ctrl+C to stop")
-        
-        last_check_time = time.time()
-        
+            self.logger.error(f"Error fetching {ticker}: {e}")
+            return None
+
+    def run(self, tickers: List[str], check_interval: int = 3600):
+        """Main trading loop."""
+        self.logger.info(
+            f"Watching: {', '.join(tickers)} | Interval: {check_interval / 60:.0f} min\n"
+        )
+        last_check = 0
         try:
             while True:
-                current_time = time.time()
-                
-                # Check if it's time to update (every hour)
-                if current_time - last_check_time >= check_interval:
-                    self.logger.info(f"\n🔄 Checking markets at {datetime.now().strftime('%H:%M:%S')}")
-                    
-                    current_prices = {}
-                    
-                    for ticker in tickers:
-                        # Get 1-hour data and convert to 4-hour
-                        hourly_data = self.get_live_data(ticker, '1h', '5d')
-                        data_4h = self.convert_to_4h(hourly_data)
-                        
-                        if data_4h is None:
-                            self.logger.warning(f"No data for {ticker}")
+                if time.time() - last_check < check_interval:
+                    time.sleep(60)
+                    continue
+
+                self.logger.info(
+                    f"--- Market Check @ {datetime.now().strftime('%H:%M:%S')} ---"
+                )
+                spy_data = self.get_market_data("SPY")
+                market_data = {t: self.get_market_data(t) for t in tickers}
+                current_prices = {
+                    t: d["Close"].iloc[-1]
+                    for t, d in market_data.items()
+                    if d is not None
+                }
+
+                for name, strategy in self.strategies.items():
+                    for ticker, data in market_data.items():
+                        if data is None or len(data) < 50:
                             continue
-                        
-                        current_price = data_4h['Close'].iloc[-1]
-                        current_prices[ticker] = current_price
-                        
-                        # Get SPY data for relative strength
-                        spy_hourly = self.get_live_data('SPY', '1h', '5d')
-                        spy_4h = self.convert_to_4h(spy_hourly) if spy_hourly is not None else None
-                        
-                        # Update existing positions
-                        self.update_positions(ticker, current_price)
-                        
-                        # Check for new signals
-                        signal, trade_data = self.check_signals(ticker, data_4h, spy_4h)
-                        
-                        if signal:
-                            self.execute_trade(ticker, signal, trade_data, current_price)
-                    
-                    # Log portfolio status
-                    self.log_portfolio_status(current_prices)
-                    
-                    # Update equity curve
-                    portfolio_value = self.get_portfolio_value(current_prices)
-                    self.equity_curve.append(portfolio_value)
-                    
-                    last_check_time = current_time
-                
-                # Sleep for 1 minute before next check
-                time.sleep(60)
-                
+
+                        if ticker in self.positions[name]:
+                            self.update_position(
+                                strategy, ticker, current_prices[ticker], data
+                            )
+                        else:
+                            signal = strategy.check_entry(data, spy_data)
+                            if signal:
+                                self.enter_position(strategy, ticker, signal)
+
+                self.log_status(current_prices)
+                last_check = time.time()
         except KeyboardInterrupt:
-            self.logger.info(f"\n🛑 Paper trader stopped by user")
-            self.log_portfolio_status(current_prices)
-            
-            # Final summary
-            if self.trade_history:
-                total_pnl = sum([t['pnl'] for t in self.trade_history])
-                winning_trades = [t for t in self.trade_history if t['pnl'] > 0]
-                win_rate = len(winning_trades) / len(self.trade_history) * 100
-                
-                self.logger.info(f"\n📊 TRADING SUMMARY:")
-                self.logger.info(f"Total Trades: {len(self.trade_history)}")
-                self.logger.info(f"Win Rate: {win_rate:.1f}%")
-                self.logger.info(f"Total P&L: ${total_pnl:,.2f}")
-                self.logger.info(f"Final Return: {((portfolio_value/self.initial_balance-1)*100):+.2f}%")
-        
-        except Exception as e:
-            self.logger.error(f"❌ Unexpected error: {e}", exc_info=True)
+            self.logger.info("\n🛑 Shutting down...")
+            self.log_status({})
 
+    def enter_position(self, strategy: Any, ticker: str, signal: Dict[str, Any]):
+        """Enters a new long or short position."""
+        name, price = strategy.name, signal["price"]
+        pos_val = strategy.get_position_size(
+            signal.get("conviction", 5),
+            self.balances[name],
+            signal.get("volatility", 0.02),
+        )
 
-def main():
-    """Main function to run the paper trader."""
-    
-    # Configuration
-    TICKERS = ['NVDA', 'AMD', 'ETH-USD']  # Best performing assets
-    INITIAL_BALANCE = 10000
-    LEVERAGE = 2.0  # Conservative for paper trading
-    CHECK_INTERVAL = 3600  # Check every hour
-    
-    print("\n" + "="*60)
-    print("🚀 SWING STRATEGY PAPER TRADER")
-    print("="*60)
-    print(f"Tickers: {', '.join(TICKERS)}")
-    print(f"Initial Balance: ${INITIAL_BALANCE:,}")
-    print(f"Leverage: {LEVERAGE}x")
-    print(f"Check Interval: {CHECK_INTERVAL/60:.1f} minutes")
-    print("="*60)
-    print("Press Ctrl+C to stop")
-    print("="*60)
-    
-    # Create and run trader
-    trader = SwingPaperTrader(initial_balance=INITIAL_BALANCE, leverage=LEVERAGE)
-    trader.run(tickers=TICKERS, check_interval=CHECK_INTERVAL)
+        self.positions[name][ticker] = {
+            "type": signal.get("type", "long"),
+            "shares": (pos_val * strategy.leverage) / price,
+            "entry_price": price,
+            "position_value": pos_val,
+            "entry_date": datetime.now(),
+            "highest_price": price,
+            "lowest_price": price,
+            "bars_held": 0,
+        }
+        self.logger.info(
+            f"📈 [{name.upper()}] {signal.get('type', 'long').upper()} {ticker} @ ${price:.2f}"
+        )
+
+    def exit_position(
+        self, strategy: Any, ticker: str, current_price: float, reason: str
+    ):
+        """Exits a position and records the trade."""
+        name, pos = strategy.name, self.positions[name][ticker]
+        price_change = (
+            (current_price / pos["entry_price"] - 1)
+            if pos["type"] == "long"
+            else (pos["entry_price"] / current_price - 1)
+        )
+        net_pnl = (
+            price_change * pos["position_value"] * strategy.leverage
+        ) * 0.998  # Approx 0.2% fees
+
+        self.balances[name] += net_pnl
+        self.trade_history[name].append({"pnl": net_pnl})
+
+        self.logger.info(
+            f"📉 [{name.upper()}] EXIT {ticker}: ${net_pnl:+,.2f} ({price_change * 100:+.2f}%) - {reason}"
+        )
+        del self.positions[name][ticker]
+
+    def update_position(
+        self, strategy: Any, ticker: str, price: float, data: pd.DataFrame
+    ):
+        """Updates a position's stats and checks for exit signals."""
+        pos = self.positions[strategy.name][ticker]
+        pos.update(
+            {
+                "highest_price": max(price, pos["highest_price"]),
+                "lowest_price": min(price, pos.get("lowest_price", price)),
+                "bars_held": pos["bars_held"] + 1,
+            }
+        )
+
+        should_exit, reason = strategy.check_exit(pos, price)
+        if (
+            not should_exit
+            and hasattr(strategy, "check_exit_signal")
+            and strategy.check_exit_signal(data, pos["type"])
+        ):
+            should_exit, reason = True, "signal"
+
+        if should_exit:
+            self.exit_position(strategy, ticker, price, reason)
+
+    def log_status(self, current_prices: Dict[str, float]):
+        """Logs a consolidated status of all strategies."""
+        strategy_values = self.balances.copy()
+        position_details = {name: [] for name in self.strategies}
+
+        for name, positions in self.positions.items():
+            for ticker, pos in positions.items():
+                if ticker in current_prices:
+                    pnl_mult = 1 if pos["type"] == "long" else -1
+                    pnl = (
+                        (current_prices[ticker] - pos["entry_price"])
+                        * pos["shares"]
+                        * pnl_mult
+                    )
+                    strategy_values[name] += pos["position_value"] + pnl
+                    unrealized_pct = (pnl / pos["position_value"]) * 100
+                    position_details[name].append(
+                        f"{ticker} {'S ' if pos['type'] == 'short' else ''}({unrealized_pct:+.1f}%)"
+                    )
+
+        total_value = sum(strategy_values.values())
+        self.logger.info(
+            f"💼 Total Value: ${total_value:,.0f} ({(total_value / self.initial_balance - 1) * 100:+.1f}%)"
+        )
+
+        for name in self.strategies.keys():
+            trades = self.trade_history[name]
+            pnl_str = ""
+            if trades:
+                wins = sum(1 for t in trades if t["pnl"] > 0)
+                pnl_str = f"| Trades: {len(trades)} ({wins / len(trades) * 100:.0f}% W) | P&L: ${sum(t['pnl'] for t in trades):+,.0f}"
+
+            pos_str = ", ".join(position_details[name]) or "None"
+            self.logger.info(
+                f"  [{name.upper()}] Val: ${strategy_values[name]:,.0f} | Pos: {pos_str} {pnl_str}"
+            )
+        self.logger.info("-" * 20)
 
 
 if __name__ == "__main__":
-    main()
+    # Configuration
+    TICKERS = ["NVDA", "AMD", "ETH-USD", "BTC-USD"]
+    INITIAL_BALANCE = 100
+    CHECK_INTERVAL = 3600
+
+    strategies = [
+        SwingStrategy(),
+        RSIBidirectionalStrategy(),
+        RSIThresholdStrategy(),
+        RSICrossoverStrategy(),
+        MomentumBreakoutStrategy(),
+    ]
+
+    print("\n" + "=" * 70 + "\n🎯 STARTING MULTI-STRATEGY TRADER\n" + "=" * 70)
+    trader = PaperTrader(strategies, INITIAL_BALANCE)
+    trader.run(TICKERS, CHECK_INTERVAL)
+
