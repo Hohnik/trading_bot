@@ -5,13 +5,15 @@ Catches strong momentum moves with volume confirmation.
 import pandas as pd
 from typing import Optional, Dict, Any
 from . import indicators
+from .base_strategy import BaseStrategy
 
-class MomentumBreakoutStrategy:
+class MomentumBreakoutStrategy(BaseStrategy):
     """A strategy that enters on breakouts with high volume and momentum."""
-    
+
     def __init__(self, config: Dict[str, Any] = None):
         self.name = 'momentum'
-        self.config = config or {}
+        self.leverage = 1.5
+        super().__init__(config)
         self.leverage = self.config.get('leverage', 1.5)
         self.base_position_size = self.config.get('position_size', 0.3)
         self.hold_max_bars = self.config.get('hold_max_bars', 12) # 3 days

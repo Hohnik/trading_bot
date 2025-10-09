@@ -6,14 +6,16 @@ A mean-reversion strategy that longs oversold and shorts overbought conditions.
 import pandas as pd
 from typing import Optional, Dict, Any
 from . import indicators
+from .base_strategy import BaseStrategy
 
 
-class RSIBidirectionalStrategy:
+class RSIBidirectionalStrategy(BaseStrategy):
     """A strategy that trades both long and short based on RSI extremes, exiting at the mean."""
-    
+
     def __init__(self, config: Dict[str, Any] = None):
         self.name = 'rsi_bidirectional'
-        self.config = config or {}
+        self.leverage = 2.0
+        super().__init__(config)
         self.leverage = self.config.get('leverage', 2.0)
         self.base_position_size = self.config.get('position_size', 0.25)
         self.hold_max_bars = self.config.get('hold_max_bars', 48) # 12 days

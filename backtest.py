@@ -1,6 +1,6 @@
 """
-SWING STRATEGY BACKTESTER
-Tests innovative multi-factor swing trading system
+MULTI-STRATEGY BACKTESTER
+A flexible backtesting engine for various trading strategies.
 """
 
 import yfinance as yf
@@ -8,30 +8,31 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import os
-from swing_strategy import backtest_swing_strategy
 from datetime import datetime
+from typing import Any, List
+
+# Import all strategies
+from strategies.swing_strategy import SwingStrategy
+from strategies.momentum_strategy import MomentumBreakoutStrategy
+from strategies.mean_reversion_strategy import MeanReversionStrategy
+from strategies.rsi_crossover_strategy import RSICrossoverStrategy
+from strategies.rsi_threshold_strategy import RSIThresholdStrategy
+from strategies.rsi_bidirectional_strategy import RSIBidirectionalStrategy
+from strategies.macd_strategy import MACDStrategy
+from strategies.bollinger_bands_strategy import BollingerBandsStrategy
+from strategies.dual_thrust_strategy import DualThrustStrategy
 
 
-def download_data_with_spy(ticker, interval='1h', period='180d'):
+def download_data_with_spy(ticker, interval='4h', period='180d'):
     """Download asset data along with SPY for relative strength."""
     print(f"Downloading {ticker} data ({interval})...")
     
-    # Download main asset
-    data = yf.download(ticker, period=period, interval=interval,
-                       auto_adjust=True, progress=False)
-    
-    if data.empty:
-        return None, None
-    
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.droplevel(1)
-    
-    # Download SPY for relative strength
-    spy_data = yf.download('SPY', period=period, interval=interval,
-                          auto_adjust=True, progress=False)
-    
-    if not spy_data.empty and isinstance(spy_data.columns, pd.MultiIndex):
-        spy_data.columns = spy_data.columns.droplevel(1)
+    data = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
+    if data.empty: return None, None
+    if isinstance(data.columns, pd.MultiIndex): data.columns = data.columns.droplevel(1)
+
+    spy_data = yf.download('SPY', period=period, interval=interval, auto_adjust=True, progress=False)
+    if not spy_data.empty and isinstance(spy_data.columns, pd.MultiIndex): spy_data.columns = spy_data.columns.droplevel(1)
     
     data.dropna(inplace=True)
     spy_data.dropna(inplace=True)
@@ -39,299 +40,194 @@ def download_data_with_spy(ticker, interval='1h', period='180d'):
     return data, spy_data
 
 
+def backtest_strategy(strategy: Any, data: pd.DataFrame, spy_data: pd.DataFrame, initial_balance: float = 10000):
+    """A generic backtesting function for any strategy class."""
+    balance = initial_balance
+    equity_curve = [initial_balance]
+    trades = []
+    position = None
+
+    for i in range(50, len(data)):
+        current_data = data.iloc[:i]
+        current_price = current_data['Close'].iloc[-1]
+
+        if position:
+            position['bars_held'] += 1
+            position['highest_price'] = max(position.get('highest_price', current_price), current_price)
+            position['lowest_price'] = min(position.get('lowest_price', current_price), current_price)
+
+            should_exit, reason = strategy.check_exit(position, current_price)
+            if not should_exit and hasattr(strategy, 'check_exit_signal'):
+                if strategy.check_exit_signal(current_data, position['type']):
+                    should_exit, reason = True, 'signal'
+
+            if should_exit:
+                price_change = (current_price / position['entry_price'] - 1) if position['type'] == 'long' else (position['entry_price'] / current_price - 1)
+                pnl = (price_change * position['position_value'] * strategy.leverage) * 0.998
+                balance += pnl
+                
+                trades.append({
+                    'pnl': pnl, 'return_pct': price_change * 100, 'bars_held': position['bars_held'],
+                    'entry_date': position['entry_date'], 'exit_date': current_data.index[-1],
+                    'entry_price': position['entry_price'], 'exit_price': current_price,
+                    'exit_reason': reason, 'entry_signals': position.get('entry_signals', [])
+                })
+                position = None
+        
+        if not position:
+            signal = strategy.check_entry(current_data, spy_data)
+            if signal:
+                pos_val = strategy.get_position_size(signal.get('conviction', 5), balance)
+                position = {
+                    'type': signal['type'], 'shares': (pos_val * strategy.leverage) / current_price,
+                    'entry_price': current_price, 'position_value': pos_val,
+                    'entry_date': current_data.index[-1], 'highest_price': current_price,
+                    'lowest_price': current_price, 'bars_held': 0,
+                    'entry_signals': signal.get('entry_signals', [])
+                }
+
+        equity = balance
+        if position:
+            pnl_mult = 1 if position['type'] == 'long' else -1
+            unrealized_pnl = (current_price - position['entry_price']) * position['shares'] * pnl_mult
+            equity += unrealized_pnl
+        equity_curve.append(equity)
+
+    return equity_curve, trades
+
+
 def calculate_metrics(equity_curve, trades, data):
     """Calculate comprehensive performance metrics."""
-    if not equity_curve or len(equity_curve) < 2:
-        return None
+    if not equity_curve or len(equity_curve) < 2: return None
     
-    initial = equity_curve[0]
-    final = equity_curve[-1]
+    initial, final = equity_curve[0], equity_curve[-1]
     total_return = (final / initial - 1) * 100
     
-    # Returns analysis
     eq_array = np.array(equity_curve)
     returns = np.diff(eq_array) / eq_array[:-1]
     
-    # Annualized Sharpe (assuming 4h bars = 1560 periods per year)
-    periods_per_year = 1560  # 252 days * 6.5 hours / 4h bars
-    sharpe = (np.mean(returns) / np.std(returns) * np.sqrt(periods_per_year) 
-             if np.std(returns) > 0 else 0)
+    periods_per_year = 252 * (6.5 / 4) # 4h bars
+    sharpe = (np.mean(returns) / np.std(returns) * np.sqrt(periods_per_year)) if np.std(returns) > 0 else 0
     
-    # Sortino ratio (downside deviation)
     downside_returns = returns[returns < 0]
     downside_std = np.std(downside_returns) if len(downside_returns) > 0 else 0.0001
-    sortino = (np.mean(returns) / downside_std * np.sqrt(periods_per_year) 
-              if downside_std > 0 else 0)
+    sortino = (np.mean(returns) / downside_std * np.sqrt(periods_per_year)) if downside_std > 0 else 0
     
-    # Drawdown
     peak = np.maximum.accumulate(eq_array)
-    dd = (eq_array - peak) / peak
-    max_dd = np.min(dd) * 100
+    max_dd = np.min((eq_array - peak) / peak) * 100 if len(peak) > 0 else 0
     
-    # Trade statistics
     if trades:
         wins = [t for t in trades if t['pnl'] > 0]
-        losses = [t for t in trades if t['pnl'] < 0]
-        
-        win_rate = len(wins) / len(trades) * 100
-        avg_win = np.mean([t['return_pct'] for t in wins]) if wins else 0
-        avg_loss = np.mean([t['return_pct'] for t in losses]) if losses else 0
-        
-        total_win_pnl = sum([t['pnl'] for t in wins])
-        total_loss_pnl = sum([abs(t['pnl']) for t in losses])
-        profit_factor = total_win_pnl / total_loss_pnl if total_loss_pnl > 0 else 0
-        
-        avg_bars = np.mean([t['bars_held'] for t in trades])
-        avg_hold_days = avg_bars / 6  # 4h bars to days
-        
-        # Consecutive wins/losses
-        consecutive_wins = 0
-        consecutive_losses = 0
-        max_consecutive_wins = 0
-        max_consecutive_losses = 0
-        
-        for t in trades:
-            if t['pnl'] > 0:
-                consecutive_wins += 1
-                consecutive_losses = 0
-                max_consecutive_wins = max(max_consecutive_wins, consecutive_wins)
-            else:
-                consecutive_losses += 1
-                consecutive_wins = 0
-                max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
-        
-        # Time analysis
-        time_span = (data.index[-1] - data.index[0]).total_seconds() / (24 * 3600)
-        trades_per_week = (len(trades) / time_span) * 7 if time_span > 0 else 0
-        
+        win_rate = len(wins) / len(trades) * 100 if trades else 0
+        profit_factor = sum(t['pnl'] for t in wins) / abs(sum(t['pnl'] for t in trades if t['pnl'] < 0)) if any(t['pnl'] < 0 for t in trades) else 100
     else:
-        win_rate = avg_win = avg_loss = profit_factor = 0
-        avg_hold_days = 0
-        max_consecutive_wins = max_consecutive_losses = 0
-        trades_per_week = 0
-    
-    # Buy and hold
+        win_rate, profit_factor = 0, 0
+
     bh_return = (data['Close'].iloc[-1] / data['Close'].iloc[0] - 1) * 100
     
     return {
-        'total_return': total_return,
-        'sharpe': sharpe,
-        'sortino': sortino,
-        'max_dd': max_dd,
-        'win_rate': win_rate,
-        'profit_factor': profit_factor,
-        'avg_win': avg_win,
-        'avg_loss': avg_loss,
-        'num_trades': len(trades),
-        'avg_hold_days': avg_hold_days,
-        'trades_per_week': trades_per_week,
-        'bh_return': bh_return,
-        'max_consecutive_wins': max_consecutive_wins,
-        'max_consecutive_losses': max_consecutive_losses
+        'total_return': total_return, 'sharpe': sharpe, 'sortino': sortino, 'max_dd': max_dd,
+        'win_rate': win_rate, 'profit_factor': profit_factor, 'num_trades': len(trades),
+        'bh_return': bh_return
     }
 
 
-def run_backtest(ticker, interval='4h', period='180d', plot=True):
-    """
-    Run swing strategy backtest.
+def run_backtest(strategy: Any, ticker: str, interval='4h', period='180d', plot=True):
+    """Run a backtest for a given strategy and ticker."""
+    print(f"\n{'='*40}\nBACKTEST: {strategy.name.upper()} on {ticker}\n{'='*40}")
     
-    Using 4-hour data for swing trading (holds 2-7 days).
-    """
-    print(f"\n{'='*80}")
-    print(f"SWING TRADING BACKTEST: {ticker}")
-    print(f"{'='*80}")
-    
-    # Download data
     data, spy_data = download_data_with_spy(ticker, interval, period)
-    
-    if data is None or len(data) < 200:
+    if data is None or len(data) < 50:
         print(f"Insufficient data for {ticker}")
         return None
     
-    print(f"Loaded: {len(data)} bars from {data.index[0]} to {data.index[-1]}")
-    
-    # Run backtest
-    equity_curve, trades = backtest_swing_strategy(data.copy(), spy_data)
-    
-    # Calculate metrics
+    equity_curve, trades = backtest_strategy(strategy, data.copy(), spy_data)
     metrics = calculate_metrics(equity_curve, trades, data)
-    
     if not metrics:
         print("No results")
         return None
     
-    # Print results
-    print(f"\n{'='*80}")
-    print("PERFORMANCE METRICS")
-    print(f"{'='*80}")
-    print(f"  Total Return:          {metrics['total_return']:>10.2f}%")
-    print(f"  Buy & Hold:            {metrics['bh_return']:>10.2f}%")
-    print(f"  Alpha (vs B&H):        {metrics['total_return']-metrics['bh_return']:>10.2f}%")
-    print(f"  Sharpe Ratio:          {metrics['sharpe']:>10.4f}")
-    print(f"  Sortino Ratio:         {metrics['sortino']:>10.4f}")
-    print(f"  Max Drawdown:          {metrics['max_dd']:>10.2f}%")
-    print(f"\n  Total Trades:          {metrics['num_trades']:>10}")
-    print(f"  Trades per Week:       {metrics['trades_per_week']:>10.2f}")
-    print(f"  Win Rate:              {metrics['win_rate']:>10.1f}%")
-    print(f"  Profit Factor:         {metrics['profit_factor']:>10.2f}")
-    print(f"  Avg Win:               {metrics['avg_win']:>10.2f}%")
-    print(f"  Avg Loss:              {metrics['avg_loss']:>10.2f}%")
-    print(f"  Risk/Reward:           {abs(metrics['avg_win']/metrics['avg_loss']) if metrics['avg_loss'] != 0 else 0:>10.2f}")
-    print(f"  Avg Hold:              {metrics['avg_hold_days']:>10.1f} days")
-    print(f"  Max Consecutive Wins:  {metrics['max_consecutive_wins']:>10}")
-    print(f"  Max Consecutive Loss:  {metrics['max_consecutive_losses']:>10}")
+    print_metrics(metrics)
     
-    # Entry signal analysis
-    if trades:
-        all_signals = {}
-        for t in trades:
-            for signal in t['entry_signals']:
-                all_signals[signal] = all_signals.get(signal, 0) + 1
-        
-        print(f"\n  Entry Signal Frequency:")
-        for signal, count in sorted(all_signals.items(), key=lambda x: x[1], reverse=True):
-            print(f"    {signal:30s} {count:>3} ({count/len(trades)*100:>5.1f}%)")
-        
-        # Exit reason analysis
-        exit_reasons = {}
-        for t in trades:
-            reason = t['exit_reason']
-            exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
-        
-        print(f"\n  Exit Reasons:")
-        for reason, count in sorted(exit_reasons.items(), key=lambda x: x[1], reverse=True):
-            print(f"    {reason:30s} {count:>3} ({count/len(trades)*100:>5.1f}%)")
-    
-    # Plot
     if plot:
-        os.makedirs("results", exist_ok=True)
-        
-        fig = plt.figure(figsize=(16, 12))
-        
-        # Equity curve
-        ax1 = plt.subplot(3, 1, 1)
-        ax1.plot(data.index[:len(equity_curve)], equity_curve,
-                linewidth=2, color='darkgreen', label=f'Strategy: {metrics["total_return"]:.1f}%')
-        
-        # Buy & hold comparison
-        bh_equity = [10000 * (data['Close'].iloc[i] / data['Close'].iloc[0]) 
-                     for i in range(len(equity_curve))]
-        ax1.plot(data.index[:len(equity_curve)], bh_equity,
-                linewidth=2, color='blue', alpha=0.6, linestyle='--',
-                label=f'Buy & Hold: {metrics["bh_return"]:.1f}%')
-        
-        ax1.set_title(f'{ticker} - Swing Trading Strategy | {metrics["num_trades"]} trades, {metrics["trades_per_week"]:.1f}/week',
-                     fontsize=14, fontweight='bold')
-        ax1.set_ylabel('Portfolio Value ($)', fontsize=12)
-        ax1.legend(fontsize=11)
-        ax1.grid(True, alpha=0.3)
-        
-        # Price with trades
-        ax2 = plt.subplot(3, 1, 2)
-        ax2.plot(data.index, data['Close'], color='gray', alpha=0.5, linewidth=1.5)
-        
-        for t in trades:
-            color = 'green' if t['pnl'] > 0 else 'red'
-            size = min(120, max(40, abs(t['return_pct']) * 5))
-            
-            ax2.scatter(t['entry_date'], t['entry_price'],
-                       color=color, marker='^', s=size, alpha=0.7,
-                       edgecolors='black', linewidth=0.5)
-            ax2.scatter(t['exit_date'], t['exit_price'],
-                       color=color, marker='v', s=size, alpha=0.7,
-                       edgecolors='black', linewidth=0.5)
-        
-        ax2.set_title('Price & Trade Entries (^) / Exits (v)', fontsize=12)
-        ax2.set_ylabel('Price ($)', fontsize=12)
-        ax2.grid(True, alpha=0.3)
-        
-        # Drawdown chart
-        ax3 = plt.subplot(3, 1, 3)
-        eq_array = np.array(equity_curve)
-        peak = np.maximum.accumulate(eq_array)
-        dd = (eq_array - peak) / peak * 100
-        ax3.fill_between(data.index[:len(equity_curve)], 0, dd,
-                        color='red', alpha=0.3)
-        ax3.plot(data.index[:len(equity_curve)], dd,
-                color='darkred', linewidth=1.5)
-        ax3.set_title(f'Drawdown (Max: {metrics["max_dd"]:.2f}%)', fontsize=12)
-        ax3.set_xlabel('Date', fontsize=12)
-        ax3.set_ylabel('Drawdown (%)', fontsize=12)
-        ax3.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        filename = f'results/{ticker}_swing_{interval}.png'
-        plt.savefig(filename, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"\n📊 Chart saved: {filename}")
+        filename = f'results/{ticker}_{strategy.name}_{interval}.png'
+        plot_results(ticker, strategy, equity_curve, trades, data, metrics, filename)
     
     return metrics
 
+def print_metrics(metrics: dict):
+    """Prints a formatted table of performance metrics."""
+    print(f"  Total Return: {metrics['total_return']:>10.2f}%   |   Buy & Hold: {metrics['bh_return']:>10.2f}%")
+    print(f"  Sharpe Ratio: {metrics['sharpe']:>10.4f}   |   Sortino Ratio: {metrics['sortino']:>8.4f}")
+    print(f"  Max Drawdown: {metrics['max_dd']:>10.2f}%   |   Win Rate: {metrics['win_rate']:>13.1f}%")
+    print(f"  Profit Factor: {metrics['profit_factor']:>9.2f}   |   Total Trades: {metrics['num_trades']:>9}")
 
-def test_multiple_assets():
-    """Test on multiple assets."""
+def plot_results(ticker, strategy, equity_curve, trades, data, metrics, filename):
+    """Generates and saves a plot of the backtest results."""
+    os.makedirs("results", exist_ok=True)
+    fig = plt.figure(figsize=(16, 10))
     
-    # Focus on volatile tech stocks and crypto for swing trading
-    assets = [
-        'NVDA',    # High volatility tech
-        'TSLA',    # High volatility EV
-        'AMD',     # Tech
-        'COIN',    # Crypto stock
-        'BTC-USD', # Bitcoin
-        'ETH-USD', # Ethereum
-    ]
+    # Equity Curve
+    ax1 = plt.subplot(2, 1, 1)
+    ax1.plot(data.index[:len(equity_curve)], equity_curve, lw=2, color='darkgreen', label=f'Strategy: {metrics["total_return"]:.1f}%')
+    bh_equity = [10000 * (c / data['Close'].iloc[0]) for c in data['Close'][:len(equity_curve)]]
+    ax1.plot(data.index[:len(equity_curve)], bh_equity, lw=2, color='blue', alpha=0.6, ls='--', label=f'Buy & Hold: {metrics["bh_return"]:.1f}%')
+    ax1.set_title(f'{ticker} - {strategy.name.upper()} | {metrics["num_trades"]} trades', fontsize=14, fontweight='bold')
+    ax1.set_ylabel('Portfolio Value ($)')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # Price with Trades
+    ax2 = plt.subplot(2, 1, 2, sharex=ax1)
+    ax2.plot(data.index, data['Close'], color='gray', alpha=0.7, lw=1.5, label='Price')
     
+    for t in trades:
+        color = 'green' if t['pnl'] > 0 else 'red'
+        size = min(120, max(40, abs(t['return_pct']) * 10))
+        ax2.scatter(t['entry_date'], t['entry_price'], color=color, marker='^', s=size, alpha=0.9, edgecolors='black')
+        ax2.scatter(t['exit_date'], t['exit_price'], color=color, marker='v', s=size, alpha=0.9, edgecolors='black')
+    
+    ax2.set_title('Price & Trades')
+    ax2.set_ylabel('Price ($)')
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(filename, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  -> Chart saved: {filename}")
+
+def test_strategy_on_multiple_assets(strategy: Any, assets: List[str]):
+    """Tests a single strategy on a list of assets."""
+    print(f"\n{'='*80}\n🔥 TESTING STRATEGY: {strategy.name.upper()}\n{'='*80}")
     results = []
-    
-    print("\n" + "="*80)
-    print("TESTING SWING STRATEGY ON MULTIPLE ASSETS")
-    print("="*80)
-    
     for ticker in assets:
-        metrics = run_backtest(ticker, interval='4h', period='180d', plot=True)
+        metrics = run_backtest(strategy, ticker, plot=True)
         if metrics:
             metrics['ticker'] = ticker
             results.append(metrics)
     
-    # Summary
     if results:
-        print("\n" + "="*80)
-        print("SUMMARY")
-        print("="*80)
-        print(f"\n{'Ticker':<10} {'Return':<10} {'vs B&H':<10} {'Sharpe':<10} {'Win%':<8} "
-              f"{'Trades':<8} {'T/Week':<8} {'PF':<8}")
-        print("-"*80)
-        
-        for r in results:
-            alpha = r['total_return'] - r['bh_return']
-            print(f"{r['ticker']:<10} {r['total_return']:>8.2f}% {alpha:>8.2f}% "
-                  f"{r['sharpe']:>8.4f} {r['win_rate']:>6.1f}% {r['num_trades']:>6} "
-                  f"{r['trades_per_week']:>6.2f} {r['profit_factor']:>6.2f}")
-        
-        # Averages
-        print("-"*80)
-        avg_return = np.mean([r['total_return'] for r in results])
-        avg_sharpe = np.mean([r['sharpe'] for r in results])
-        avg_win_rate = np.mean([r['win_rate'] for r in results])
-        avg_pf = np.mean([r['profit_factor'] for r in results])
-        
-        print(f"{'AVERAGE':<10} {avg_return:>8.2f}% {'':>10} {avg_sharpe:>8.4f} "
-              f"{avg_win_rate:>6.1f}% {'':>14} {avg_pf:>6.2f}")
-    
-    return results
+        print(f"\n--- SUMMARY for {strategy.name.upper()} ---")
+        df = pd.DataFrame(results)
+        df = df.set_index('ticker')
+        print(df[['total_return', 'sharpe', 'win_rate', 'num_trades']].round(2))
+        print(f"\nAverage Return: {df['total_return'].mean():.2f}%")
 
 
 if __name__ == "__main__":
-    print("\n🚀 INNOVATIVE SWING TRADING STRATEGY")
-    print("="*80)
-    print("Multi-factor confluence system with:")
-    print("  • Multi-timeframe momentum")
-    print("  • Volatility breakout detection")
-    print("  • Volume confirmation")
-    print("  • Relative strength vs SPY")
-    print("  • Dynamic position sizing")
-    print("  • Adaptive trailing stops")
-    print("="*80)
+    assets_to_test = ['NVDA', 'TSLA', 'AMD', 'COIN', 'BTC-USD', 'ETH-USD']
     
-    # Test on multiple assets
-    test_multiple_assets()
+    strategies_to_test = [
+        SwingStrategy(),
+        MomentumBreakoutStrategy(),
+        MeanReversionStrategy(),
+        RSIBidirectionalStrategy(),
+        RSICrossoverStrategy(),
+        RSIThresholdStrategy(),
+        MACDStrategy(),
+        BollingerBandsStrategy(),
+        DualThrustStrategy(),
+    ]
+
+    for strategy in strategies_to_test:
+        test_strategy_on_multiple_assets(strategy, assets_to_test)

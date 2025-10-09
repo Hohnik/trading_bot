@@ -6,14 +6,16 @@ Trades RSI crosses of the 50-level centerline as a momentum signal.
 import pandas as pd
 from typing import Optional, Dict, Any
 from . import indicators
+from .base_strategy import BaseStrategy
 
 
-class RSICrossoverStrategy:
+class RSICrossoverStrategy(BaseStrategy):
     """A strategy that buys on RSI crossing above 50 and sells on crossing below 50."""
-    
+
     def __init__(self, config: Dict[str, Any] = None):
         self.name = 'rsi_crossover'
-        self.config = config or {}
+        self.leverage = 1.5
+        super().__init__(config)
         self.leverage = self.config.get('leverage', 1.5)
         self.base_position_size = self.config.get('position_size', 0.20)
         self.hold_max_bars = self.config.get('hold_max_bars', 24) # 6 days

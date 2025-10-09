@@ -7,13 +7,15 @@ import pandas as pd
 import numpy as np
 from typing import Optional, Dict, Any
 from . import indicators
+from .base_strategy import BaseStrategy
 
-class SwingStrategy:
+class SwingStrategy(BaseStrategy):
     """A swing strategy that enters on strong technical confluence."""
-    
+
     def __init__(self, config: Dict[str, Any] = None):
         self.name = 'swing'
-        self.config = config or {}
+        self.leverage = 2.0
+        super().__init__(config)
         self.leverage = self.config.get('leverage', 2.0)
         self.base_position_size = self.config.get('position_size', 0.4)
         self.hold_max_bars = self.config.get('hold_max_bars', 30) # ~7.5 days

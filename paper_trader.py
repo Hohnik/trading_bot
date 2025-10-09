@@ -15,6 +15,9 @@ from strategies.momentum_strategy import MomentumBreakoutStrategy
 from strategies.rsi_crossover_strategy import RSICrossoverStrategy
 from strategies.rsi_threshold_strategy import RSIThresholdStrategy
 from strategies.rsi_bidirectional_strategy import RSIBidirectionalStrategy
+from strategies.macd_strategy import MACDStrategy
+from strategies.bollinger_bands_strategy import BollingerBandsStrategy
+from strategies.dual_thrust_strategy import DualThrustStrategy
 
 
 class PaperTrader:
@@ -233,6 +236,9 @@ if __name__ == "__main__":
         RSIThresholdStrategy(),
         RSICrossoverStrategy(),
         MomentumBreakoutStrategy(),
+        MACDStrategy(),
+        BollingerBandsStrategy(),
+        DualThrustStrategy(),
     ]
 
     print("\n" + "=" * 70 + "\n🎯 STARTING MULTI-STRATEGY TRADER\n" + "=" * 70)

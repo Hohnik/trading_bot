@@ -6,14 +6,16 @@ A classic mean-reversion strategy that buys oversold conditions.
 import pandas as pd
 from typing import Optional, Dict, Any
 from . import indicators
+from .base_strategy import BaseStrategy
 
 
-class RSIThresholdStrategy:
+class RSIThresholdStrategy(BaseStrategy):
     """A strategy that buys when RSI is oversold (<30) and exits when overbought (>70)."""
-    
+
     def __init__(self, config: Dict[str, Any] = None):
         self.name = 'rsi_threshold'
-        self.config = config or {}
+        self.leverage = 1.5
+        super().__init__(config)
         self.leverage = self.config.get('leverage', 1.5)
         self.base_position_size = self.config.get('position_size', 0.25)
         self.hold_max_bars = self.config.get('hold_max_bars', 48) # 12 days

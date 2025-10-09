@@ -6,14 +6,16 @@ Trades oversold bounces using RSI and Bollinger Bands.
 import pandas as pd
 from typing import Optional, Dict, Any
 from . import indicators
+from .base_strategy import BaseStrategy
 
 
-class MeanReversionStrategy:
+class MeanReversionStrategy(BaseStrategy):
     """A strategy that buys oversold assets near their Bollinger Band support."""
-    
+
     def __init__(self, config: Dict[str, Any] = None):
         self.name = 'mean_reversion'
-        self.config = config or {}
+        self.leverage = 1.5
+        super().__init__(config)
         self.leverage = self.config.get('leverage', 1.5)
         self.base_position_size = self.config.get('position_size', 0.3)
         self.hold_max_bars = self.config.get('hold_max_bars', 20) # 5 days

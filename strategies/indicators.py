@@ -48,3 +48,12 @@ def detect_volatility_expansion(atr: pd.Series, period: int = 10) -> pd.Series:
     """Detect when volatility is expanding."""
     atr_ma = atr.rolling(window=period).mean()
     return atr > atr_ma * 1.3
+
+def calculate_macd(prices: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Calculate MACD, signal line, and histogram."""
+    ema_fast = prices.ewm(span=fast, adjust=False).mean()
+    ema_slow = prices.ewm(span=slow, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    histogram = macd - signal_line
+    return macd, signal_line, histogram
